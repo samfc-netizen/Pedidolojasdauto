@@ -327,60 +327,113 @@ def parse_linha_produto(linha, meses):
     return row
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=1)
 def ler_pdf_bytes(bytes_pdf):
-    texto_total = ""
+    """
+    Leitura otimizada para Streamlit Cloud.
 
-    with pdfplumber.open(io.BytesIO(bytes_pdf)) as pdf:
-        for page in pdf.pages:
-            texto_total += "\n" + (page.extract_text(x_tolerance=1, y_tolerance=3) or "")
+    A versão anterior montava uma string gigante com o PDF inteiro usando pdfplumber.
+    Em PDF maior isso fica lento e pode derrubar o app por consumo de memória.
 
-    meses = extrair_meses_cabecalho(texto_total)
-    if len(meses) < 4:
-        raise ValueError("Não consegui identificar os 4 meses do relatório.")
-
+    Fluxo atual:
+    1) tenta PyMuPDF, que é bem mais rápido para texto;
+    2) processa página por página, sem guardar o PDF inteiro em memória;
+    3) se PyMuPDF não estiver instalado, usa pdfplumber como fallback.
+    """
     registros = []
     empresa_codigo = None
     empresa_nome = None
     linha_atual = None
     grupo_atual = None
 
-    for raw in texto_total.splitlines():
-        linha = " ".join(raw.split()).strip()
-        if not linha:
-            continue
+    def processar_texto(texto, meses):
+        nonlocal empresa_codigo, empresa_nome, linha_atual, grupo_atual, registros
 
-        m_emp = EMPRESA_RE.search(linha)
-        if m_emp:
-            empresa_codigo = m_emp.group(1)
-            empresa_nome = m_emp.group(2).strip()
-            continue
+        for raw in str(texto or "").splitlines():
+            linha = " ".join(raw.split()).strip()
+            if not linha:
+                continue
 
-        m_linha = LINHA_RE.search(linha)
-        if m_linha:
-            linha_atual = m_linha.group(1).strip()
-            continue
+            m_emp = EMPRESA_RE.search(linha)
+            if m_emp:
+                empresa_codigo = m_emp.group(1)
+                empresa_nome = m_emp.group(2).strip()
+                continue
 
-        m_grupo = GRUPO_RE.search(linha)
-        if m_grupo:
-            grupo_atual = m_grupo.group(1).strip()
-            continue
+            m_linha = LINHA_RE.search(linha)
+            if m_linha:
+                linha_atual = m_linha.group(1).strip()
+                continue
 
-        if empresa_codigo and linha_produto_valida(linha):
-            item = parse_linha_produto(linha, meses)
-            if item:
-                item["EMPRESA_CODIGO"] = empresa_codigo
-                item["EMPRESA_NOME"] = empresa_nome
-                item["LINHA"] = linha_atual
-                item["GRUPO"] = grupo_atual
-                registros.append(item)
+            m_grupo = GRUPO_RE.search(linha)
+            if m_grupo:
+                grupo_atual = m_grupo.group(1).strip()
+                continue
+
+            if empresa_codigo and linha_produto_valida(linha):
+                item = parse_linha_produto(linha, meses)
+                if item:
+                    item["EMPRESA_CODIGO"] = empresa_codigo
+                    item["EMPRESA_NOME"] = empresa_nome
+                    item["LINHA"] = linha_atual
+                    item["GRUPO"] = grupo_atual
+                    registros.append(item)
+
+    def ler_com_pymupdf():
+        import fitz
+
+        meses = []
+        paginas_buffer = []
+
+        with fitz.open(stream=bytes_pdf, filetype="pdf") as doc:
+            for page in doc:
+                texto = page.get_text("text") or ""
+
+                if not meses:
+                    paginas_buffer.append(texto)
+                    meses = extrair_meses_cabecalho("\n".join(paginas_buffer))
+                    if len(meses) >= 4:
+                        for texto_buffer in paginas_buffer:
+                            processar_texto(texto_buffer, meses)
+                        paginas_buffer = []
+                else:
+                    processar_texto(texto, meses)
+
+        return meses
+
+    def ler_com_pdfplumber():
+        meses = []
+        paginas_buffer = []
+
+        with pdfplumber.open(io.BytesIO(bytes_pdf)) as pdf:
+            for page in pdf.pages:
+                texto = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
+
+                if not meses:
+                    paginas_buffer.append(texto)
+                    meses = extrair_meses_cabecalho("\n".join(paginas_buffer))
+                    if len(meses) >= 4:
+                        for texto_buffer in paginas_buffer:
+                            processar_texto(texto_buffer, meses)
+                        paginas_buffer = []
+                else:
+                    processar_texto(texto, meses)
+
+        return meses
+
+    try:
+        meses = ler_com_pymupdf()
+    except Exception:
+        meses = ler_com_pdfplumber()
+
+    if len(meses) < 4:
+        raise ValueError("Não consegui identificar os 4 meses do relatório.")
 
     df = pd.DataFrame(registros)
     if df.empty:
         raise ValueError("Não consegui extrair os itens do PDF. Verifique se o relatório está no mesmo padrão.")
 
     return df, meses
-
 
 def numero(v):
     try:
