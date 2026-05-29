@@ -328,8 +328,7 @@ def parse_linha_produto(linha, meses):
 
 
 @st.cache_data(show_spinner=False)
-def ler_pdf(uploaded_file):
-    bytes_pdf = uploaded_file.read()
+def ler_pdf_bytes(bytes_pdf):
     texto_total = ""
 
     with pdfplumber.open(io.BytesIO(bytes_pdf)) as pdf:
@@ -388,6 +387,43 @@ def numero(v):
         return f"{float(v):,.0f}".replace(",", ".")
     except Exception:
         return "0"
+
+
+def preparar_download_csv(df):
+    return df.to_csv(index=False, sep=";", decimal=",", encoding="utf-8-sig").encode("utf-8-sig")
+
+
+def exibir_tabela_controlada(titulo, df, colunas=None, sort_by=None, ascending=True, key="tabela", limite_preview=500):
+    """
+    Evita travamento no Streamlit quando o PDF traz muitos itens sem giro.
+    Mostra uma prévia e libera download da base completa.
+    """
+    st.markdown(titulo)
+    if df is None or df.empty:
+        st.success("Nenhum item encontrado nessa análise.")
+        return
+
+    tabela = df.copy()
+    if colunas:
+        colunas_existentes = [c for c in colunas if c in tabela.columns]
+        tabela = tabela[colunas_existentes]
+
+    if sort_by:
+        sort_cols = [c for c in sort_by if c in tabela.columns] if isinstance(sort_by, list) else ([sort_by] if sort_by in tabela.columns else [])
+        if sort_cols:
+            tabela = tabela.sort_values(sort_cols, ascending=ascending)
+
+    total = len(tabela)
+    st.caption(f"Total encontrado: {numero(total)} item(ns). A tela mostra até {limite_preview} linhas para não travar; o download traz tudo.")
+    st.dataframe(tabela.head(limite_preview), use_container_width=True, hide_index=True, height=420)
+    st.download_button(
+        "Baixar tabela completa em CSV",
+        data=preparar_download_csv(tabela),
+        file_name=f"{key}.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key=f"download_{key}"
+    )
 
 
 def ajustar_para_caixa_fechada(qtd, qtd_embalagem):
@@ -758,8 +794,10 @@ if uploaded is None:
     st.stop()
 
 try:
-    df, meses = ler_pdf(uploaded)
-    base_inicial, cod_loja, loja_nome = preparar_base(df, meses, percentual_pico)
+    bytes_pdf = uploaded.getvalue()
+    with st.spinner("Lendo o PDF e preparando a análise..."):
+        df, meses = ler_pdf_bytes(bytes_pdf)
+        base_inicial, cod_loja, loja_nome = preparar_base(df, meses, percentual_pico)
 
     st.success(f"PDF lido com sucesso. Loja identificada: {cod_loja} - {loja_nome}. Meses analisados: {', '.join(meses)}.")
 
@@ -833,10 +871,13 @@ try:
             "<div class='alert-box'><b>Atenção:</b> estes produtos estão sem giro na loja. Avalie ações de venda, exposição, campanha, transferência ou devolução.</div>",
             unsafe_allow_html=True
         )
-        st.dataframe(
-            itens_sem_giro[colunas_sem_giro].sort_values(["ESTOQUE", "DESCRICAO"], ascending=[False, True]),
-            use_container_width=True,
-            hide_index=True
+        exibir_tabela_controlada(
+            "",
+            itens_sem_giro,
+            colunas=colunas_sem_giro,
+            sort_by=["ESTOQUE", "DESCRICAO"],
+            ascending=[False, True],
+            key="itens_sem_giro_loja"
         )
 
     st.markdown("### Alerta gerencial: itens com excesso acima de 70% do pico")
@@ -856,10 +897,13 @@ try:
             "<div class='alert-box'><b>Atenção:</b> estes itens estão com estoque acima de 70% do pico de vendas. Avalie ação de venda, remanejamento ou redução de compra.</div>",
             unsafe_allow_html=True
         )
-        st.dataframe(
-            itens_excesso_70[colunas_excesso].sort_values(["EXCESSO_ACIMA_70_PICO", "DESCRICAO"], ascending=[False, True]),
-            use_container_width=True,
-            hide_index=True
+        exibir_tabela_controlada(
+            "",
+            itens_excesso_70,
+            colunas=colunas_excesso,
+            sort_by=["EXCESSO_ACIMA_70_PICO", "DESCRICAO"],
+            ascending=[False, True],
+            key="itens_excesso_70_pico"
         )
 
     st.markdown("### Tabela principal do pedido")
@@ -953,13 +997,23 @@ try:
             )
 
     st.markdown("### Base completa analisada")
-    with st.expander("Ver todos os itens analisados"):
+    st.download_button(
+        "Baixar base completa analisada em CSV",
+        data=preparar_download_csv(base.sort_values(["STATUS", "GRUPO", "DESCRICAO"])),
+        file_name="base_completa_analisada.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="download_base_completa"
+    )
+    if st.checkbox("Mostrar prévia da base completa na tela", value=False):
         st.dataframe(
-            base.sort_values(["STATUS", "GRUPO", "DESCRICAO"]),
+            base.sort_values(["STATUS", "GRUPO", "DESCRICAO"]).head(500),
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
+            height=420
         )
 
 except Exception as e:
     st.error(f"Erro ao processar o PDF: {e}")
-    st.info("Confirme se o PDF contém a empresa 009 Única Atacadista e uma loja Dauto no mesmo relatório.")
+    st.info("Confirme se o PDF contém a empresa 009 Única Atacadista e uma loja Dauto no mesmo relatório. Se o PDF for muito grande, use o download das tabelas e evite abrir a base completa na tela.")
+    st.exception(e)
