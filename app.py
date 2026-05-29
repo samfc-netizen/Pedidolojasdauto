@@ -437,6 +437,10 @@ def preparar_base(df, meses, percentual_pico):
     loja = df_loja.copy()
     loja["PICO_VENDA"] = loja[meses].max(axis=1)
     loja["MESES_COM_GIRO"] = (loja[meses] > 0).sum(axis=1)
+    loja["SEM_GIRO_LOJA"] = loja["MESES_COM_GIRO"] == 0
+    loja["LIMITE_EXCESSO_70_PICO"] = loja["PICO_VENDA"] * 0.70
+    loja["EXCESSO_ACIMA_70_PICO"] = (loja["ESTOQUE"] - loja["LIMITE_EXCESSO_70_PICO"]).clip(lower=0)
+    loja["ALERTA_EXCESSO_70_PICO"] = (loja["PICO_VENDA"] > 0) & (loja["ESTOQUE"] > loja["LIMITE_EXCESSO_70_PICO"])
     loja["ESTOQUE_ALVO"] = loja["PICO_VENDA"] * percentual_pico
     loja["NECESSIDADE_BRUTA"] = loja["ESTOQUE_ALVO"] - loja["ESTOQUE"]
     loja["SUGESTAO_BRUTA"] = loja["NECESSIDADE_BRUTA"].apply(lambda x: max(0, int(math.ceil(x))))
@@ -799,11 +803,64 @@ try:
     total_atendido = int(base["QTD_ATENDIDA"].sum())
     total_ruptura = int(base["RUPTURA_UNICA"].sum())
 
+    itens_sem_giro = base[base["SEM_GIRO_LOJA"]].copy()
+    itens_excesso_70 = base[base["ALERTA_EXCESSO_70_PICO"]].copy()
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Itens no pedido", numero(pedido["CODIGO"].nunique()))
     c2.metric("Qtd sugerida aprovada", numero(total_sugerido))
     c3.metric("Qtd atendida pela Única", numero(total_atendido))
     c4.metric("Qtd em ruptura", numero(total_ruptura))
+
+    a1, a2 = st.columns(2)
+    a1.metric("Itens sem giro na loja", numero(itens_sem_giro["CODIGO"].nunique()))
+    a2.metric("Itens com excesso > 70% do pico", numero(itens_excesso_70["CODIGO"].nunique()))
+
+    st.markdown("### Alerta gerencial: itens sem giro na loja")
+    st.caption("Itens que aparecem no PDF da loja, mas não tiveram venda em nenhum dos meses analisados. Use esta lista para ação comercial, exposição, oferta ou avaliação de devolução/remanejamento.")
+
+    colunas_sem_giro = [
+        "CODIGO", "DESCRICAO", "UN", "GRUPO",
+        *meses,
+        "MESES_COM_GIRO", "PICO_VENDA", "ESTOQUE", "SALDO_UNICA",
+        "PR_ULT_COMP", "DT_ULT_COMP", "PR_VENDA"
+    ]
+
+    if itens_sem_giro.empty:
+        st.success("Nenhum item sem giro foi identificado para a loja selecionada.")
+    else:
+        st.markdown(
+            "<div class='alert-box'><b>Atenção:</b> estes produtos estão sem giro na loja. Avalie ações de venda, exposição, campanha, transferência ou devolução.</div>",
+            unsafe_allow_html=True
+        )
+        st.dataframe(
+            itens_sem_giro[colunas_sem_giro].sort_values(["ESTOQUE", "DESCRICAO"], ascending=[False, True]),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    st.markdown("### Alerta gerencial: itens com excesso acima de 70% do pico")
+    st.caption("Considera excesso quando o estoque atual da loja está acima de 70% do maior mês de venda do item no período analisado.")
+
+    colunas_excesso = [
+        "CODIGO", "DESCRICAO", "UN", "GRUPO",
+        *meses,
+        "MESES_COM_GIRO", "PICO_VENDA", "LIMITE_EXCESSO_70_PICO",
+        "ESTOQUE", "EXCESSO_ACIMA_70_PICO", "SALDO_UNICA", "PR_ULT_COMP", "DT_ULT_COMP", "PR_VENDA"
+    ]
+
+    if itens_excesso_70.empty:
+        st.success("Nenhum item com excesso acima de 70% do pico foi identificado.")
+    else:
+        st.markdown(
+            "<div class='alert-box'><b>Atenção:</b> estes itens estão com estoque acima de 70% do pico de vendas. Avalie ação de venda, remanejamento ou redução de compra.</div>",
+            unsafe_allow_html=True
+        )
+        st.dataframe(
+            itens_excesso_70[colunas_excesso].sort_values(["EXCESSO_ACIMA_70_PICO", "DESCRICAO"], ascending=[False, True]),
+            use_container_width=True,
+            hide_index=True
+        )
 
     st.markdown("### Tabela principal do pedido")
     st.caption("Mostra somente os itens com quantidade atendida pela Única. A quantidade já considera alerta de giro e regra de caixa fechada.")
