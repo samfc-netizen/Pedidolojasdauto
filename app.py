@@ -254,41 +254,61 @@ def token_data_br(token):
 
 def parse_linha_produto(linha, meses):
     """
-    Parser robusto lendo da direita para a esquerda.
+    Parser robusto para o relatório de Giro de Estoque do Autcom.
 
-    Motivo:
-    Existem produtos cuja descrição contém a palavra UN ou códigos numéricos antes da unidade real,
-    por exemplo: AUTOCOAT BT 090 MM 01 - BINDER 18L UN 1263 TINTA 3 II.
-    O parser antigo pegava o primeiro UN da descrição e deslocava as colunas.
-
-    Regra nova:
-    As últimas 12 colunas do relatório são fixas:
-    4 meses + MEDIA + PREVI.30 + ESTOQUE + SUGESTAO + PR.ULT.COMP + DT.ULT.COMP + PR.VENDA + % LUCRO.
-    Portanto, a unidade real é o token imediatamente anterior a essas 12 colunas.
+    O PDF pode vir com DT.ULT.COMP preenchida ou sem data. Quando a data está vazia,
+    o extrator de PDF remove essa coluna, então a linha fica com 11 colunas finais,
+    não 12. Essa era a causa do erro de extração dos itens sem giro.
     """
     linha = " ".join(str(linha).split()).strip()
     partes = linha.split()
 
-    if len(partes) < 15:
+    if len(partes) < 14:
+        return None
+
+    if not re.fullmatch(r"\d{3,6}", partes[0]):
         return None
 
     codigo = normalizar_codigo(partes[0])
 
-    # Pega as 12 colunas finais fixas.
-    nums = partes[-12:]
-    corpo = partes[1:-12]
+    # Com data: 4 meses + MEDIA + PREVI.30 + ESTOQUE + SUGESTAO + PR.ULT.COMP + DT.ULT.COMP + PR.VENDA + % LUCRO
+    if len(partes) >= 15 and token_data_br(partes[-3]):
+        nums = partes[-12:]
+        corpo = partes[1:-12]
+        dt_ult_comp = nums[9]
+
+        indices_numericos = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]
+        if not all(token_numero_br(nums[i]) for i in indices_numericos):
+            return None
+
+        valores_meses = nums[0:4]
+        media = nums[4]
+        previ_30 = nums[5]
+        estoque = nums[6]
+        sugestao_original = nums[7]
+        pr_ult_comp = nums[8]
+        pr_venda = nums[10]
+        lucro = nums[11]
+
+    # Sem data: 4 meses + MEDIA + PREVI.30 + ESTOQUE + SUGESTAO + PR.ULT.COMP + PR.VENDA + % LUCRO
+    else:
+        nums = partes[-11:]
+        corpo = partes[1:-11]
+        dt_ult_comp = ""
+
+        if not all(token_numero_br(x) for x in nums):
+            return None
+
+        valores_meses = nums[0:4]
+        media = nums[4]
+        previ_30 = nums[5]
+        estoque = nums[6]
+        sugestao_original = nums[7]
+        pr_ult_comp = nums[8]
+        pr_venda = nums[9]
+        lucro = nums[10]
 
     if len(corpo) < 2:
-        return None
-
-    # Validação básica para evitar capturar cabeçalhos/linhas quebradas.
-    # A data deve estar na posição 10 das 12 colunas finais.
-    if not token_data_br(nums[9]):
-        return None
-
-    # As demais colunas finais, exceto data, devem ser numéricas no padrão do relatório.
-    indices_numericos = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]
-    if not all(token_numero_br(nums[i]) for i in indices_numericos):
         return None
 
     un = corpo[-1].upper()
@@ -296,16 +316,6 @@ def parse_linha_produto(linha, meses):
 
     if not descricao:
         return None
-
-    valores_meses = nums[0:4]
-    media = nums[4]
-    previ_30 = nums[5]
-    estoque = nums[6]
-    sugestao_original = nums[7]
-    pr_ult_comp = nums[8]
-    dt_ult_comp = nums[9]
-    pr_venda = nums[10]
-    lucro = nums[11]
 
     row = {
         "CODIGO": codigo,
@@ -330,15 +340,14 @@ def parse_linha_produto(linha, meses):
 @st.cache_data(show_spinner=False, max_entries=1)
 def ler_pdf_bytes(bytes_pdf):
     """
-    Leitura otimizada para Streamlit Cloud.
+    Leitura compatível com Streamlit Cloud.
 
-    A versão anterior montava uma string gigante com o PDF inteiro usando pdfplumber.
-    Em PDF maior isso fica lento e pode derrubar o app por consumo de memória.
+    O PyMuPDF em modo texto puro lê rápido, mas neste relatório ele altera a ordem das
+    colunas. Por isso usamos PyMuPDF em modo WORDS, remontando cada linha pela posição
+    horizontal. É rápido e preserva o padrão:
+    CODIGO + DESCRICAO + UN + MESES + MEDIA + PREVI.30 + ESTOQUE + SUGESTAO + PREÇOS.
 
-    Fluxo atual:
-    1) tenta PyMuPDF, que é bem mais rápido para texto;
-    2) processa página por página, sem guardar o PDF inteiro em memória;
-    3) se PyMuPDF não estiver instalado, usa pdfplumber como fallback.
+    Se PyMuPDF não estiver disponível, o código usa pdfplumber como fallback.
     """
     registros = []
     empresa_codigo = None
@@ -346,84 +355,112 @@ def ler_pdf_bytes(bytes_pdf):
     linha_atual = None
     grupo_atual = None
 
-    def processar_texto(texto, meses):
+    def processar_linha(linha, meses):
         nonlocal empresa_codigo, empresa_nome, linha_atual, grupo_atual, registros
 
-        for raw in str(texto or "").splitlines():
-            linha = " ".join(raw.split()).strip()
-            if not linha:
-                continue
+        linha = " ".join(str(linha or "").split()).strip()
+        if not linha:
+            return
 
-            m_emp = EMPRESA_RE.search(linha)
-            if m_emp:
-                empresa_codigo = m_emp.group(1)
-                empresa_nome = m_emp.group(2).strip()
-                continue
+        m_emp = EMPRESA_RE.search(linha)
+        if m_emp:
+            empresa_codigo = m_emp.group(1)
+            empresa_nome = m_emp.group(2).strip()
+            return
 
-            m_linha = LINHA_RE.search(linha)
-            if m_linha:
-                linha_atual = m_linha.group(1).strip()
-                continue
+        m_linha = LINHA_RE.search(linha)
+        if m_linha:
+            linha_atual = m_linha.group(1).strip()
+            return
 
-            m_grupo = GRUPO_RE.search(linha)
-            if m_grupo:
-                grupo_atual = m_grupo.group(1).strip()
-                continue
+        m_grupo = GRUPO_RE.search(linha)
+        if m_grupo:
+            grupo_atual = m_grupo.group(1).strip()
+            return
 
-            if empresa_codigo and linha_produto_valida(linha):
-                item = parse_linha_produto(linha, meses)
-                if item:
-                    item["EMPRESA_CODIGO"] = empresa_codigo
-                    item["EMPRESA_NOME"] = empresa_nome
-                    item["LINHA"] = linha_atual
-                    item["GRUPO"] = grupo_atual
-                    registros.append(item)
+        if empresa_codigo and linha_produto_valida(linha):
+            item = parse_linha_produto(linha, meses)
+            if item:
+                item["EMPRESA_CODIGO"] = empresa_codigo
+                item["EMPRESA_NOME"] = empresa_nome
+                item["LINHA"] = linha_atual
+                item["GRUPO"] = grupo_atual
+                registros.append(item)
+
+    def linhas_pymupdf(page):
+        agrupadas = {}
+        for x0, y0, x1, y1, palavra, *_ in page.get_text("words"):
+            # As linhas do relatório têm espaçamento vertical regular. Agrupar por Y
+            # evita o erro do page.get_text("text"), que devolve as colunas fora de ordem.
+            chave_y = round(float(y0) / 3) * 3
+            agrupadas.setdefault(chave_y, []).append((float(x0), str(palavra)))
+
+        linhas = []
+        for chave_y in sorted(agrupadas):
+            palavras = [p for _, p in sorted(agrupadas[chave_y], key=lambda x: x[0])]
+            linhas.append(" ".join(palavras))
+        return linhas
 
     def ler_com_pymupdf():
         import fitz
 
         meses = []
-        paginas_buffer = []
+        buffer_linhas = []
 
         with fitz.open(stream=bytes_pdf, filetype="pdf") as doc:
             for page in doc:
-                texto = page.get_text("text") or ""
+                linhas = linhas_pymupdf(page)
 
                 if not meses:
-                    paginas_buffer.append(texto)
-                    meses = extrair_meses_cabecalho("\n".join(paginas_buffer))
+                    buffer_linhas.extend(linhas)
+                    meses = extrair_meses_cabecalho("\n".join(buffer_linhas))
                     if len(meses) >= 4:
-                        for texto_buffer in paginas_buffer:
-                            processar_texto(texto_buffer, meses)
-                        paginas_buffer = []
+                        for linha in buffer_linhas:
+                            processar_linha(linha, meses)
+                        buffer_linhas = []
                 else:
-                    processar_texto(texto, meses)
+                    for linha in linhas:
+                        processar_linha(linha, meses)
 
         return meses
 
     def ler_com_pdfplumber():
         meses = []
-        paginas_buffer = []
+        buffer_linhas = []
 
         with pdfplumber.open(io.BytesIO(bytes_pdf)) as pdf:
             for page in pdf.pages:
                 texto = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
+                linhas = texto.splitlines()
 
                 if not meses:
-                    paginas_buffer.append(texto)
-                    meses = extrair_meses_cabecalho("\n".join(paginas_buffer))
+                    buffer_linhas.extend(linhas)
+                    meses = extrair_meses_cabecalho("\n".join(buffer_linhas))
                     if len(meses) >= 4:
-                        for texto_buffer in paginas_buffer:
-                            processar_texto(texto_buffer, meses)
-                        paginas_buffer = []
+                        for linha in buffer_linhas:
+                            processar_linha(linha, meses)
+                        buffer_linhas = []
                 else:
-                    processar_texto(texto, meses)
+                    for linha in linhas:
+                        processar_linha(linha, meses)
 
         return meses
 
     try:
         meses = ler_com_pymupdf()
+        # Se por algum motivo o PyMuPDF não capturar registros, tenta pdfplumber.
+        if not registros:
+            empresa_codigo = None
+            empresa_nome = None
+            linha_atual = None
+            grupo_atual = None
+            meses = ler_com_pdfplumber()
     except Exception:
+        registros.clear()
+        empresa_codigo = None
+        empresa_nome = None
+        linha_atual = None
+        grupo_atual = None
         meses = ler_com_pdfplumber()
 
     if len(meses) < 4:
@@ -434,6 +471,7 @@ def ler_pdf_bytes(bytes_pdf):
         raise ValueError("Não consegui extrair os itens do PDF. Verifique se o relatório está no mesmo padrão.")
 
     return df, meses
+
 
 def numero(v):
     try:
