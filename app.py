@@ -604,6 +604,19 @@ def preparar_base(df, meses, percentual_pico):
     loja["SUGESTAO_PEDIDO"] = [a[0] for a in ajustados]
     loja["REGRA_EMBALAGEM"] = [a[1] for a in ajustados]
 
+    # Regra gerencial:
+    # Produto sem giro na loja não deve gerar sugestão de pedido,
+    # mesmo quando o estoque estiver negativo.
+    # Esses itens permanecem apenas no relatório de "Itens sem giro".
+    loja.loc[loja["SEM_GIRO_LOJA"], "SUGESTAO_PEDIDO"] = 0
+    loja.loc[loja["SEM_GIRO_LOJA"], "REGRA_EMBALAGEM"] = "Sem giro: não gera pedido"
+    loja["ALERTA_SALDO_NEGATIVO_SEM_GIRO"] = (loja["SEM_GIRO_LOJA"]) & (loja["ESTOQUE"] < 0)
+    loja["DESCRICAO_SEM_GIRO"] = loja.apply(
+        lambda r: f'{r["DESCRICAO"]} | ⚠️ Saldo negativo: {int(r["ESTOQUE"])} un.'
+        if r["ALERTA_SALDO_NEGATIVO_SEM_GIRO"] else r["DESCRICAO"],
+        axis=1
+    )
+
     loja["ALERTA_GIRO_1_MES"] = (loja["SUGESTAO_PEDIDO"] > 0) & (loja["MESES_COM_GIRO"] == 1)
 
     base = loja.merge(unica_base, on="CODIGO", how="left")
@@ -1163,8 +1176,8 @@ try:
             itens_sem_giro = base[base["SEM_GIRO_LOJA"]].copy()
             st.metric("Itens sem giro na loja", numero(itens_sem_giro["CODIGO"].nunique()))
             colunas_sem_giro = [
-                "CODIGO", "DESCRICAO", *meses,
-                "MESES_COM_GIRO", "PICO_VENDA", "ESTOQUE"
+                "CODIGO", "DESCRICAO_SEM_GIRO", *meses,
+                "MESES_COM_GIRO", "PICO_VENDA", "ESTOQUE", "ALERTA_SALDO_NEGATIVO_SEM_GIRO"
             ]
             if itens_sem_giro.empty:
                 st.success("Nenhum item sem giro foi identificado para a loja selecionada.")
@@ -1177,8 +1190,8 @@ try:
                     "",
                     itens_sem_giro,
                     colunas=colunas_sem_giro,
-                    sort_by=["ESTOQUE", "DESCRICAO"],
-                    ascending=[False, True],
+                    sort_by=["ALERTA_SALDO_NEGATIVO_SEM_GIRO", "ESTOQUE", "DESCRICAO"],
+                    ascending=[False, True, True],
                     key="itens_sem_giro_loja"
                 )
 
