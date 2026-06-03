@@ -507,7 +507,16 @@ def exibir_tabela_controlada(titulo, df, colunas=None, sort_by=None, ascending=T
     if sort_by:
         sort_cols = [c for c in sort_by if c in tabela.columns] if isinstance(sort_by, list) else ([sort_by] if sort_by in tabela.columns else [])
         if sort_cols:
-            tabela = tabela.sort_values(sort_cols, ascending=ascending)
+            # Garante que a quantidade de valores em ascending acompanhe
+            # exatamente a quantidade de colunas realmente existentes.
+            # Isso evita o erro: Length of ascending != length of by.
+            if isinstance(ascending, list):
+                ascending_ok = ascending[:len(sort_cols)]
+                if len(ascending_ok) < len(sort_cols):
+                    ascending_ok += [ascending_ok[-1] if ascending_ok else True] * (len(sort_cols) - len(ascending_ok))
+            else:
+                ascending_ok = ascending
+            tabela = tabela.sort_values(sort_cols, ascending=ascending_ok)
 
     total = len(tabela)
     st.caption(f"Total encontrado: {numero(total)} item(ns). A tela mostra até {limite_preview} linhas para não travar; o download traz tudo.")
@@ -1190,7 +1199,7 @@ try:
                     "",
                     itens_sem_giro,
                     colunas=colunas_sem_giro,
-                    sort_by=["ALERTA_SALDO_NEGATIVO_SEM_GIRO", "ESTOQUE", "DESCRICAO"],
+                    sort_by=["ALERTA_SALDO_NEGATIVO_SEM_GIRO", "ESTOQUE", "DESCRICAO_SEM_GIRO"],
                     ascending=[False, True, True],
                     key="itens_sem_giro_loja"
                 )
