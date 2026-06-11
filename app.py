@@ -2,6 +2,7 @@ import re
 import io
 import math
 import base64
+import hashlib
 import pdfplumber
 import pandas as pd
 import streamlit as st
@@ -939,6 +940,39 @@ def renderizar_tutorial_relatorio():
         st.warning("Não foi possível carregar a imagem do tutorial.")
 
 
+def assinatura_pedido_editavel(df):
+    """
+    Gera uma assinatura somente dos campos editáveis do pedido principal.
+    Serve para identificar alteração em quantidade ou inclusão/exclusão sem depender da ordem da tabela.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return ""
+    colunas = [c for c in ["CODIGO", "INCLUIR_NO_PEDIDO", "QTD_PEDIDA"] if c in df.columns]
+    if not colunas:
+        return ""
+    temp = df[colunas].copy()
+    temp["CODIGO"] = temp["CODIGO"].astype(str)
+    if "INCLUIR_NO_PEDIDO" in temp.columns:
+        temp["INCLUIR_NO_PEDIDO"] = temp["INCLUIR_NO_PEDIDO"].fillna(False).astype(bool)
+    if "QTD_PEDIDA" in temp.columns:
+        temp["QTD_PEDIDA"] = pd.to_numeric(temp["QTD_PEDIDA"], errors="coerce").fillna(0).astype(int)
+    return temp.sort_values("CODIGO").to_json(orient="records", force_ascii=False)
+
+
+def resetar_estado_pedido_por_novo_pdf(contexto_pdf):
+    """
+    Evita carregar status de pedido salvo/alterado de um PDF anterior.
+    """
+    if st.session_state.get("contexto_pdf_pedido") != contexto_pdf:
+        st.session_state["contexto_pdf_pedido"] = contexto_pdf
+        st.session_state["pedido_salvo"] = False
+        st.session_state["pedido_alterado"] = False
+        st.session_state["assinatura_pedido_salvo"] = None
+        st.session_state["excel_salvo"] = None
+        st.session_state["pdf_faltas_salvo"] = None
+        st.session_state["confirmou_saida_sem_salvar"] = False
+
+
 if "iniciar_analise" not in st.session_state:
     st.session_state["iniciar_analise"] = False
 
@@ -987,6 +1021,9 @@ if uploaded is None:
 
 try:
     bytes_pdf = uploaded.getvalue()
+    contexto_pdf = hashlib.md5(bytes_pdf).hexdigest()
+    resetar_estado_pedido_por_novo_pdf(contexto_pdf)
+
     with st.spinner("Lendo o PDF e preparando a análise..."):
         df, meses = ler_pdf_bytes(bytes_pdf)
         base_inicial, cod_loja, loja_nome = preparar_base(df, meses, percentual_pico)
@@ -1016,22 +1053,24 @@ try:
         key="pagina_radio"
     )
 
-    saiu_do_pedido_para_sem_giro = (
+    saiu_do_pedido_sem_salvar = (
         pagina_anterior == "2. Pedido principal"
-        and pagina_escolhida == "3. Itens sem giro"
+        and pagina_escolhida != "2. Pedido principal"
+        and st.session_state.get("pedido_alterado", False)
         and not st.session_state.get("pedido_salvo", False)
         and not st.session_state.get("confirmou_saida_sem_salvar", False)
     )
 
-    if saiu_do_pedido_para_sem_giro:
+    if saiu_do_pedido_sem_salvar:
         st.warning(
-            "Você está saindo da página de pedido sem salvar. "
-            "Os dados não salvos serão perdidos. Deseja realmente sair sem salvar o pedido?"
+            "Você alterou campos do pedido e ainda não salvou. "
+            "Se sair agora, os dados não salvos serão perdidos. Deseja realmente sair sem salvar o pedido?"
         )
         col_confirmar, col_voltar = st.columns(2)
         with col_confirmar:
             if st.button("Sim, sair sem salvar", type="primary", use_container_width=True):
                 st.session_state["confirmou_saida_sem_salvar"] = True
+                st.session_state["pedido_alterado"] = False
                 st.session_state["pagina_atual"] = pagina_escolhida
                 st.rerun()
         with col_voltar:
@@ -1120,9 +1159,14 @@ try:
                 pedido_editor.insert(0, "INCLUIR_NO_PEDIDO", True)
                 pedido_editor.insert(1, "QTD_PEDIDA", pedido_editor["SUGESTAO_FINAL"].fillna(0).astype(int))
                 pedido_editor = pedido_editor.rename(columns={"SUGESTAO_FINAL": "QTD_CALCULADA"})
+                pedido_editor = pedido_editor.sort_values(["DESCRICAO"])
+
+                assinatura_inicial_pedido = assinatura_pedido_editavel(pedido_editor)
+                if st.session_state.get("assinatura_pedido_salvo") is None:
+                    st.session_state["assinatura_pedido_salvo"] = assinatura_inicial_pedido
 
                 pedido_editor = st.data_editor(
-                    pedido_editor.sort_values(["DESCRICAO"]),
+                    pedido_editor,
                     use_container_width=True,
                     hide_index=True,
                     disabled=[c for c in pedido_editor.columns if c not in ["INCLUIR_NO_PEDIDO", "QTD_PEDIDA"]],
@@ -1132,6 +1176,12 @@ try:
                     },
                     key="editor_pedido_principal"
                 )
+
+                assinatura_atual_pedido = assinatura_pedido_editavel(pedido_editor)
+                st.session_state["pedido_alterado"] = assinatura_atual_pedido != st.session_state.get("assinatura_pedido_salvo")
+                if st.session_state["pedido_alterado"]:
+                    st.session_state["pedido_salvo"] = False
+                    st.session_state["confirmou_saida_sem_salvar"] = False
 
             base, pedido, ruptura, alertas_nao_aprovados = aplicar_edicoes_pedido(base, pedido_editor)
 
@@ -1199,6 +1249,8 @@ try:
 
             if st.button("Salvar pedido editado", type="primary", use_container_width=True):
                 st.session_state["pedido_salvo"] = True
+                st.session_state["pedido_alterado"] = False
+                st.session_state["assinatura_pedido_salvo"] = assinatura_pedido_editavel(pedido_editor)
                 st.session_state["excel_salvo"] = gerar_excel_importacao(pedido)
                 st.session_state["pdf_faltas_salvo"] = gerar_pdf_faltas_tabela(ruptura, loja_nome)
                 st.success("Pedido salvo. Exportações liberadas.")
