@@ -993,17 +993,59 @@ try:
 
     st.success(f"PDF lido com sucesso. Loja identificada: {cod_loja} - {loja_nome}. Meses analisados: {', '.join(meses)}.")
 
-    pagina = st.sidebar.radio(
+    paginas = [
+        "1. Giro em apenas 1 mês",
+        "2. Pedido principal",
+        "3. Itens sem giro",
+        "4. Excessos acima do pico",
+        "5. Base completa"
+    ]
+
+    if "pagina_atual" not in st.session_state:
+        st.session_state["pagina_atual"] = paginas[0]
+    if "pagina_radio" not in st.session_state:
+        st.session_state["pagina_radio"] = st.session_state["pagina_atual"]
+    if "confirmou_saida_sem_salvar" not in st.session_state:
+        st.session_state["confirmou_saida_sem_salvar"] = False
+
+    pagina_anterior = st.session_state.get("pagina_atual", paginas[0])
+    pagina_escolhida = st.sidebar.radio(
         "Navegação",
-        [
-            "1. Giro em apenas 1 mês",
-            "2. Pedido principal",
-            "3. Itens sem giro",
-            "4. Excessos acima do pico",
-            "5. Base completa"
-        ],
-        index=0
+        paginas,
+        index=paginas.index(st.session_state.get("pagina_radio", paginas[0])),
+        key="pagina_radio"
     )
+
+    saiu_do_pedido_para_sem_giro = (
+        pagina_anterior == "2. Pedido principal"
+        and pagina_escolhida == "3. Itens sem giro"
+        and not st.session_state.get("pedido_salvo", False)
+        and not st.session_state.get("confirmou_saida_sem_salvar", False)
+    )
+
+    if saiu_do_pedido_para_sem_giro:
+        st.warning(
+            "Você está saindo da página de pedido sem salvar. "
+            "Os dados não salvos serão perdidos. Deseja realmente sair sem salvar o pedido?"
+        )
+        col_confirmar, col_voltar = st.columns(2)
+        with col_confirmar:
+            if st.button("Sim, sair sem salvar", type="primary", use_container_width=True):
+                st.session_state["confirmou_saida_sem_salvar"] = True
+                st.session_state["pagina_atual"] = pagina_escolhida
+                st.rerun()
+        with col_voltar:
+            if st.button("Não, voltar para salvar", use_container_width=True):
+                st.session_state["pagina_radio"] = pagina_anterior
+                st.session_state["pagina_atual"] = pagina_anterior
+                st.rerun()
+        st.stop()
+
+    st.session_state["pagina_atual"] = pagina_escolhida
+    if pagina_escolhida == "2. Pedido principal":
+        st.session_state["confirmou_saida_sem_salvar"] = False
+
+    pagina = st.session_state["pagina_atual"]
 
     alertas = base_inicial[
         (base_inicial["ALERTA_GIRO_1_MES"]) &
@@ -1062,11 +1104,18 @@ try:
                 st.warning("Nenhum item entrou no pedido com os parâmetros atuais ou com as aprovações de giro em 1 mês.")
                 pedido_editor = pd.DataFrame()
             else:
+                itens_para_revisar["LINHA/GRUPO"] = (
+                    itens_para_revisar.get("LINHA", "").fillna("").astype(str)
+                    + " / "
+                    + itens_para_revisar.get("GRUPO", "").fillna("").astype(str)
+                ).str.strip(" /")
+
                 pedido_editor = itens_para_revisar[[
-                    "CODIGO", "DESCRICAO", *meses,
+                    "CODIGO", "DESCRICAO", "LINHA/GRUPO", *meses,
+                    "ESTOQUE", "SALDO_UNICA",
                     "MESES_COM_GIRO", "PICO_ORIGINAL", "SEGUNDO_MAIOR_PICO", "PICO_VENDA", "ALERTA_PICO",
-                    "ESTOQUE", "ESTOQUE_ALVO", "QTD_EMBALAGEM", "SUGESTAO_PEDIDO", "SUGESTAO_FINAL",
-                    "SALDO_UNICA", "PR_VENDA", "STATUS"
+                    "ESTOQUE_ALVO", "QTD_EMBALAGEM", "SUGESTAO_PEDIDO", "SUGESTAO_FINAL",
+                    "PR_VENDA", "STATUS"
                 ]].copy()
                 pedido_editor.insert(0, "INCLUIR_NO_PEDIDO", True)
                 pedido_editor.insert(1, "QTD_PEDIDA", pedido_editor["SUGESTAO_FINAL"].fillna(0).astype(int))
@@ -1096,11 +1145,20 @@ try:
             c3.metric("Qtd atendida pela Única", numero(total_atendido))
             c4.metric("Qtd em ruptura", numero(total_ruptura))
 
+            pedido_para_exibir = pedido.copy()
+            if not pedido_para_exibir.empty:
+                pedido_para_exibir["LINHA/GRUPO"] = (
+                    pedido_para_exibir.get("LINHA", "").fillna("").astype(str)
+                    + " / "
+                    + pedido_para_exibir.get("GRUPO", "").fillna("").astype(str)
+                ).str.strip(" /")
+
             colunas_pedido = [
-                "CODIGO", "DESCRICAO", *meses,
+                "CODIGO", "DESCRICAO", "LINHA/GRUPO", *meses,
+                "ESTOQUE", "SALDO_UNICA",
                 "MESES_COM_GIRO", "PICO_ORIGINAL", "SEGUNDO_MAIOR_PICO", "PICO_VENDA", "ALERTA_PICO",
-                "ESTOQUE", "ESTOQUE_ALVO", "QTD_EMBALAGEM", "SUGESTAO_PEDIDO",
-                "QTD_SOLICITADA_GERENTE", "SALDO_UNICA", "QTD_ATENDIDA", "PR_VENDA", "STATUS"
+                "ESTOQUE_ALVO", "QTD_EMBALAGEM", "SUGESTAO_PEDIDO",
+                "QTD_SOLICITADA_GERENTE", "QTD_ATENDIDA", "PR_VENDA", "STATUS"
             ]
 
             st.markdown("### Pedido final após edição")
@@ -1108,7 +1166,7 @@ try:
                 st.warning("Nenhum item será atendido pela Única com as edições atuais.")
             else:
                 st.dataframe(
-                    pedido[colunas_pedido].sort_values(["DESCRICAO"]),
+                    pedido_para_exibir[colunas_pedido].sort_values(["DESCRICAO"]),
                     use_container_width=True,
                     hide_index=True
                 )
