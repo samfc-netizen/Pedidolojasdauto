@@ -1,4 +1,5 @@
 streamlit
+streamlit-aggrid==1.2.0.post2
 pandas
 pdfplumber
 PyMuPDF

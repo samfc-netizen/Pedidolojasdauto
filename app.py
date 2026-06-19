@@ -6,6 +6,7 @@ import hashlib
 import pdfplumber
 import pandas as pd
 import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder
 
 st.set_page_config(
     page_title="Pedido entre Loja Dauto e Única",
@@ -1143,39 +1144,108 @@ try:
                 st.warning("Nenhum item entrou no pedido com os parâmetros atuais ou com as aprovações de giro em 1 mês.")
                 pedido_editor = pd.DataFrame()
             else:
-                itens_para_revisar["LINHA/GRUPO"] = (
-                    itens_para_revisar.get("LINHA", "").fillna("").astype(str)
-                    + " / "
-                    + itens_para_revisar.get("GRUPO", "").fillna("").astype(str)
-                ).str.strip(" /")
-
                 pedido_editor = itens_para_revisar[[
-                    "CODIGO", "DESCRICAO", "LINHA/GRUPO", *meses,
-                    "ESTOQUE", "SALDO_UNICA",
-                    "MESES_COM_GIRO", "PICO_ORIGINAL", "SEGUNDO_MAIOR_PICO", "PICO_VENDA", "ALERTA_PICO",
-                    "ESTOQUE_ALVO", "QTD_EMBALAGEM", "SUGESTAO_PEDIDO", "SUGESTAO_FINAL",
-                    "PR_VENDA", "STATUS"
+                    "CODIGO", "DESCRICAO", "LINHA", "GRUPO", *meses,
+                    "ESTOQUE", "SALDO_UNICA", "SUGESTAO_FINAL"
                 ]].copy()
                 pedido_editor.insert(0, "INCLUIR_NO_PEDIDO", True)
                 pedido_editor.insert(1, "QTD_PEDIDA", pedido_editor["SUGESTAO_FINAL"].fillna(0).astype(int))
-                pedido_editor = pedido_editor.rename(columns={"SUGESTAO_FINAL": "QTD_CALCULADA"})
+                pedido_editor = pedido_editor.drop(columns=["SUGESTAO_FINAL"])
                 pedido_editor = pedido_editor.sort_values(["DESCRICAO"])
 
                 assinatura_inicial_pedido = assinatura_pedido_editavel(pedido_editor)
                 if st.session_state.get("assinatura_pedido_salvo") is None:
                     st.session_state["assinatura_pedido_salvo"] = assinatura_inicial_pedido
 
-                pedido_editor = st.data_editor(
-                    pedido_editor,
-                    use_container_width=True,
-                    hide_index=True,
-                    disabled=[c for c in pedido_editor.columns if c not in ["INCLUIR_NO_PEDIDO", "QTD_PEDIDA"]],
-                    column_config={
-                        "INCLUIR_NO_PEDIDO": st.column_config.CheckboxColumn("Incluir?", help="Desmarque para excluir o item do pedido."),
-                        "QTD_PEDIDA": st.column_config.NumberColumn("Qtd pedida", min_value=0, step=1, help="Altere a quantidade final solicitada para a loja."),
-                    },
-                    key="editor_pedido_principal"
+                construtor_grid = GridOptionsBuilder.from_dataframe(pedido_editor)
+                construtor_grid.configure_default_column(
+                    editable=False,
+                    sortable=True,
+                    filter=True,
+                    resizable=True,
                 )
+                construtor_grid.configure_column("CODIGO", hide=True)
+                construtor_grid.configure_column(
+                    "INCLUIR_NO_PEDIDO",
+                    header_name="Incluir?",
+                    editable=True,
+                    cellRenderer="agCheckboxCellRenderer",
+                    cellEditor="agCheckboxCellEditor",
+                    width=95,
+                    pinned="left",
+                    sortable=False,
+                    filter=False,
+                )
+                construtor_grid.configure_column(
+                    "QTD_PEDIDA",
+                    header_name="Quantidade",
+                    editable=True,
+                    type=["numericColumn"],
+                    cellEditor="agNumberCellEditor",
+                    cellEditorParams={"min": 0, "step": 1, "precision": 0},
+                    width=115,
+                    pinned="left",
+                )
+                construtor_grid.configure_column(
+                    "DESCRICAO",
+                    header_name="Produto",
+                    minWidth=300,
+                    flex=2,
+                    pinned="left",
+                )
+                construtor_grid.configure_column("LINHA", header_name="Linha", minWidth=150)
+                construtor_grid.configure_column("GRUPO", header_name="Grupo", minWidth=160)
+                for mes in meses:
+                    construtor_grid.configure_column(
+                        mes,
+                        header_name=f"Giro {mes}",
+                        type=["numericColumn"],
+                        width=115,
+                    )
+                construtor_grid.configure_column(
+                    "ESTOQUE",
+                    header_name="Estoque loja",
+                    type=["numericColumn"],
+                    width=125,
+                )
+                construtor_grid.configure_column(
+                    "SALDO_UNICA",
+                    header_name="Estoque Única",
+                    type=["numericColumn"],
+                    width=130,
+                )
+                construtor_grid.configure_selection(
+                    selection_mode="single",
+                    use_checkbox=False,
+                    suppressRowClickSelection=False,
+                )
+
+                resposta_grid = AgGrid(
+                    pedido_editor,
+                    gridOptions=construtor_grid.build(),
+                    height=520,
+                    theme="streamlit",
+                    update_on=["cellValueChanged", "selectionChanged"],
+                    data_return_mode="AS_INPUT",
+                    server_sync_strategy="client_wins",
+                    custom_css={
+                        ".ag-row-hover": {
+                            "background-color": "#f8fafc !important",
+                            "cursor": "pointer",
+                        },
+                        ".ag-row-selected": {
+                            "background-color": "#fef3c7 !important",
+                            "border-left": "5px solid #f59e0b !important",
+                            "font-weight": "600",
+                        },
+                    },
+                    show_search=False,
+                    show_download_button=False,
+                    key=f"editor_pedido_principal_{contexto_pdf}_{percentual_pico}",
+                )
+                pedido_editor = resposta_grid.data
+                if not isinstance(pedido_editor, pd.DataFrame):
+                    pedido_editor = pd.DataFrame(pedido_editor)
 
                 assinatura_atual_pedido = assinatura_pedido_editavel(pedido_editor)
                 st.session_state["pedido_alterado"] = assinatura_atual_pedido != st.session_state.get("assinatura_pedido_salvo")
